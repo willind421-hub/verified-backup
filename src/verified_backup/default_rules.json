@@ -1,0 +1,62 @@
+{
+  "schema_version": "verified-backup-rules/v1",
+  "description": "Default rules: back up every file under the source root except VCS metadata, caches, virtual environments, temp/lock files, symlinks/junctions and secret-like file names.",
+  "targets": [
+    {
+      "name": "source_root",
+      "path": ".",
+      "include": ["**/*"],
+      "exclude": []
+    }
+  ],
+  "exclude": {
+    "skip_symlinks": true,
+    "path_patterns": [
+      "**/.git/**",
+      "**/.hg/**",
+      "**/.svn/**",
+      "**/__pycache__/**",
+      "**/.pytest_cache/**",
+      "**/node_modules/**",
+      "**/.venv/**",
+      "**/.venv-*/*",
+      "**/venv/**",
+      "**/.mypy_cache/**",
+      "**/.ruff_cache/**",
+      "**/*.tmp",
+      "**/*.temp",
+      "**/*.cache",
+      "**/*.pid",
+      "**/*.lock"
+    ],
+    "secret_name_patterns": [
+      ".env",
+      ".env.*",
+      "*.env",
+      "*.env.*",
+      "*secret*",
+      "*credential*",
+      "*credentials*",
+      "*token*",
+      "*api_key*",
+      "*apikey*",
+      "*private_key*",
+      "id_rsa*",
+      "id_dsa*",
+      "id_ecdsa*",
+      "id_ed25519*",
+      "*.pem",
+      "*.key",
+      "*.p12",
+      "*.pfx",
+      "*.kdbx",
+      "*.session",
+      "*session.secret*",
+      "*oauth*",
+      "*password*",
+      "*passwd*",
+      "*cookie*",
+      "*totp*"
+    ]
+  }
+}

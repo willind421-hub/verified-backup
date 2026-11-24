@@ -1,0 +1,47 @@
+{
+  "schema_version": "verified-backup-rules/v1",
+  "description": "Example multi-target rules: documents, code and evidence folders under one source root.",
+  "targets": [
+    {
+      "name": "documents",
+      "path": "documents",
+      "include": ["**/*"],
+      "exclude": ["**/~$*"]
+    },
+    {
+      "name": "code",
+      "path": "code",
+      "include": ["**/*.py", "**/*.toml", "**/*.md"],
+      "exclude": ["build/**", "dist/**"]
+    },
+    {
+      "name": "evidence",
+      "path": "evidence",
+      "include": ["**/*"],
+      "exclude": []
+    }
+  ],
+  "exclude": {
+    "skip_symlinks": true,
+    "path_patterns": [
+      "**/.git/**",
+      "**/__pycache__/**",
+      "**/.pytest_cache/**",
+      "**/node_modules/**",
+      "**/.venv/**",
+      "**/*.tmp",
+      "**/*.lock"
+    ],
+    "secret_name_patterns": [
+      ".env",
+      ".env.*",
+      "*secret*",
+      "*credential*",
+      "*token*",
+      "*.pem",
+      "*.key",
+      "id_rsa*",
+      "*password*"
+    ]
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "schema_version": "verified-backup-rules/v1",
+  "description": "Synthetic multi-target rules used by the test-suite.",
+  "targets": [
+    {
+      "name": "notes_docs",
+      "path": "docs/notes",
+      "include": ["**/*"],
+      "exclude": []
+    },
+    {
+      "name": "notes_app_data",
+      "path": "projects/notes-app/data",
+      "include": ["**/*"],
+      "exclude": []
+    },
+    {
+      "name": "feed_reader_data",
+      "path": "projects/feed-reader/data",
+      "include": ["**/*"],
+      "exclude": []
+    },
+    {
+      "name": "task_runner_data",
+      "path": "projects/task-runner/data",
+      "include": ["**/*"],
+      "exclude": []
+    },
+    {
+      "name": "sync_service_data",
+      "path": "projects/sync-service/data",
+      "include": ["**/*"],
+      "exclude": ["compile_cache/**", "test_dbs/**"]
+    },
+    {
+      "name": "model_builder_artifacts",
+      "path": "projects/model-builder/artifacts",
+      "include": ["**/*"],
+      "exclude": []
+    },
+    {
+      "name": "chat_server_db",
+      "path": "projects/chat-server",
+      "include": [
+        "app.db",
+        "app.db-shm",
+        "app.db-wal",
+        "app.db-journal"
+      ],
+      "exclude": []
+    },
+    {
+      "name": "dashboard_backend_db_logs",
+      "path": "projects/dashboard/backend",
+      "include": [
+        "*.db",
+        "*.db-shm",
+        "*.db-wal",
+        "*.db-journal",
+        "*.log",
+        "data/**/*",
+        "memory_db/**/*",
+        "logs/**/*"
+      ],
+      "exclude": [
+        "*.session",
+        "*.pt",
+        "*.zip"
+      ]
+    }
+  ],
+  "exclude": {
+    "skip_symlinks": true,
+    "path_patterns": [
+      "**/.git/**",
+      "**/__pycache__/**",
+      "**/node_modules/**",
+      "**/.venv/**",
+      "**/*.tmp",
+      "**/*.pid",
+      "**/*.lock"
+    ],
+    "secret_name_patterns": [
+      ".env",
+      ".env.*",
+      "*secret*",
+      "*credential*",
+      "*token*",
+      "*.session",
+      "*password*"
+    ]
+  }
+}
