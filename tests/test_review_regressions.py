@@ -395,6 +395,26 @@ def test_example_exercises_review_safety_defaults():
         assert marker in proc.stdout
 
 
+def test_example_accepts_temporary_directory_alias(tmp_path, monkeypatch, capsys):
+    import runpy
+    import tempfile
+    from contextlib import contextmanager
+    repo = Path(__file__).resolve().parents[1]
+    demo = runpy.run_path(str(repo / 'examples/end_to_end_demo.py'))
+    temporary_directory = tempfile.TemporaryDirectory
+
+    @contextmanager
+    def aliased_directory(*args, **kwargs):
+        with temporary_directory(*args, dir=tmp_path, **kwargs) as actual:
+            child = Path(actual) / 'alias'
+            child.mkdir()
+            yield str(child / '..')
+
+    monkeypatch.setattr(tempfile, 'TemporaryDirectory', aliased_directory)
+    assert demo['main']() == 0
+    assert 'DEMO PASS' in capsys.readouterr().out
+
+
 @pytest.mark.parametrize('fmt', ['zip', 'tar'])
 @pytest.mark.parametrize('case', ['duplicate-payload', 'duplicate-manifest', 'extra', 'missing',
                                   'outside', 'case-collision', 'file-parent'])

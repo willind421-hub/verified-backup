@@ -57,7 +57,7 @@ def create_source(root: Path) -> None:
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="verified-backup-demo-") as tmp:
-        tmp_path = Path(tmp)
+        tmp_path = Path(tmp).resolve()
         source = tmp_path / "source"
         out = tmp_path / "backups"
         create_source(source)
