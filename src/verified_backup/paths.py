@@ -74,9 +74,28 @@ def first_link_component(path: Path, root: Path) -> Path | None:
     return None
 
 
+def validate_file_path(rel_path: str) -> str:
+    """Accept only canonical, portable relative file paths; never normalize input.
+
+    Reject NTFS alternate streams, Windows device names and aliases on every OS.
+    This same spelling is used for manifest, payload and restored paths.
+    """
+    if not isinstance(rel_path, str) or not rel_path or "\\" in rel_path:
+        raise ValueError(f"Unsafe relative path: {rel_path!r}")
+    reserved = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    reserved.update(prefix + digit for prefix in ("COM", "LPT") for digit in "123456789¹²³")
+    for part in rel_path.split("/"):
+        if (not part or part in (".", "..") or part[-1] in ". "
+                or any(ord(c) < 32 or c in '<>:"|?*' for c in part)
+                or part.split(".", 1)[0].upper() in reserved):
+            raise ValueError(f"Unsafe relative path: {rel_path!r}")
+    return rel_path
+
+
 def safe_join(root: Path, rel_path: str) -> Path:
+    validate_file_path(rel_path)
     rel = PurePosixPath(rel_path)
-    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+    if rel.is_absolute() or not rel.parts:
         raise ValueError(f"Unsafe relative path: {rel_path}")
     candidate = root.joinpath(*rel.parts).resolve()
     if not is_relative_to(candidate, root):

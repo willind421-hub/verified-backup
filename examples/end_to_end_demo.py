@@ -62,9 +62,35 @@ def main() -> int:
         out = tmp_path / "backups"
         create_source(source)
 
-        scan = run_cli("scan", "--root", str(source), "--config", str(RULES))
+        scan_path = tmp_path / "scan.json"
+        scan = run_cli("scan", "--root", str(source), "--config", str(RULES), "--output", str(scan_path))
         print(f"scan: {scan['summary']['file_count']} files, "
               f"{scan['summary']['excluded_count']} excluded")
+        scan_manifest = json.loads(scan_path.read_text(encoding="utf-8"))
+        assert "source_root" not in scan_manifest and "rules" not in scan_manifest
+        assert scan_manifest["excluded"] == [] and scan_manifest["excluded_counts"]["secret_name"] == 1
+        assert all("target" not in item for item in scan_manifest["files"])
+        print("metadata redacted: exclusion counts only; local paths and rules omitted")
+        private_path = tmp_path / "private-scan.json"
+        run_cli("scan", "--root", str(source), "--config", str(RULES),
+                "--include-private-metadata", "--output", str(private_path))
+        private = json.loads(private_path.read_text(encoding="utf-8"))
+        assert private["source_root"] == source.as_posix() and private["excluded"]
+        print("private scan: local-only opt-in includes excluded paths and rules")
+
+        nested = run_cli("backup", "--root", str(source), "--output-dir", str(source / "backups"), expect=2)
+        assert "outside" in nested["error"].lower() and not (source / "backups").exists()
+        print("nested output refused: no self-inclusion")
+        missing_rules = json.loads(RULES.read_text(encoding="utf-8"))
+        missing_rules["targets"].append({"name": "required", "path": "absent", "include": ["**/*"]})
+        missing_config = tmp_path / "missing-rules.json"
+        missing_config.write_text(json.dumps(missing_rules), encoding="utf-8")
+        missing_scan = run_cli("scan", "--root", str(source), "--config", str(missing_config), expect=1)
+        assert missing_scan["summary"]["missing_target_count"] == 1
+        missing = run_cli("backup", "--root", str(source), "--config", str(missing_config),
+                          "--output-dir", str(tmp_path / "missing-output"), expect=2)
+        assert "missing" in missing["error"] and not (tmp_path / "missing-output").exists()
+        print("missing target refused: scan exit 1, backup exit 2, no output")
 
         results = {}
         for fmt in ("zip", "tar"):
@@ -76,11 +102,16 @@ def main() -> int:
             verify = run_cli("verify", backup["archive"], "--checksums", backup["checksums"])
             print(f"{fmt}: archived {backup['summary']['file_count']} files, "
                   f"verify ok={verify['ok']} checked={verify['checked_files']}")
+            before = Path(backup["archive"]).read_bytes()
+            repeat = run_cli("backup", "--root", str(source), "--config", str(RULES),
+                             "--output-dir", str(out), "--format", fmt, "--name", f"demo-{fmt}", expect=2)
+            assert "already exists" in repeat["error"] and Path(backup["archive"]).read_bytes() == before
+            print(f"{fmt}: repeat backup refused; existing archive unchanged")
 
         archive = results["zip"]["archive"]
         manifest = json.loads(Path(results["zip"]["manifest"]).read_text(encoding="utf-8"))
-        for item in manifest["excluded"]:
-            print(f"  excluded {item['path']} ({item['reason']})")
+        assert manifest["excluded"] == []
+        print(f"  excluded counts: {manifest['excluded_counts']}")
 
         dest = tmp_path / "restored"
         dry = run_cli("restore", archive, "--dest", str(dest))

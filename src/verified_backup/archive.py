@@ -6,7 +6,9 @@ import copy
 import gzip
 import hashlib
 import json
+import os
 import tarfile
+import tempfile
 import zipfile
 import zlib
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from .paths import validate_file_path
 from .scanner import ScannedFile, manifest_bytes, sha256_file
 
 BACKUP_MANIFEST_NAME = "BACKUP_MANIFEST.json"
@@ -45,6 +48,9 @@ def archive_extension(archive_format: str) -> str:
 
 def make_archive_name(name: str | None, archive_format: str) -> str:
     safe_name = name or f"verified-backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    validate_file_path(safe_name)
+    if "/" in safe_name:
+        raise ArchiveError("Archive name must be a single filename, not a path")
     return safe_name + archive_extension(archive_format)
 
 
@@ -60,19 +66,34 @@ def write_archive(
     The final manifest records size and SHA-256 of the bytes actually written to
     the archive, not the values seen during the scan.
     """
+    if manifest.get("summary", {}).get("missing_target_count") or manifest.get("missing_targets"):
+        raise ArchiveError("Refusing backup with missing configured targets")
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     if archive_path.exists():
         raise ArchiveError(f"Archive already exists: {archive_path}")
 
-    if archive_format == "zip":
-        final_files = _write_zip(archive_path, manifest, files)
-    elif archive_format == "tar":
-        final_files = _write_tar(archive_path, manifest, files)
-    else:
-        raise ArchiveError(f"Unsupported archive format: {archive_format}")
-    final_manifest = _finalize_manifest(manifest, final_files)
-    _replace_embedded_manifest(archive_path, archive_format, final_manifest, files)
-    return final_manifest
+    # Build in a uniquely owned file, then publish without replacing a winner.
+    # A hard link is an atomic no-clobber publication on supported filesystems.
+    # Unsupported filesystems fail closed rather than fall back to replacement.
+    with tempfile.NamedTemporaryFile(prefix=".verified-backup-", dir=archive_path.parent,
+                                     delete=False) as staging:
+        tmp_path = Path(staging.name)
+    try:
+        if archive_format == "zip":
+            final_files = _write_zip(tmp_path, manifest, files)
+        elif archive_format == "tar":
+            final_files = _write_tar(tmp_path, manifest, files)
+        else:
+            raise ArchiveError(f"Unsupported archive format: {archive_format}")
+        final_manifest = _finalize_manifest(manifest, final_files)
+        # Import lazily because the reader imports archive constants. Publish only
+        # manifests accepted by that same reader, including portable path rules.
+        from .verify import validate_manifest
+        validate_manifest(final_manifest)
+        os.link(tmp_path, archive_path)
+        return final_manifest
+    finally:
+        tmp_path.unlink()
 
 
 def write_sidecar_manifests(
@@ -86,7 +107,6 @@ def write_sidecar_manifests(
     if manifest_path.exists() or checksum_path.exists():
         raise ArchiveError("Manifest or checksum sidecar already exists")
 
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     checksum_manifest = {
         "schema_version": CHECKSUM_SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -102,10 +122,16 @@ def write_sidecar_manifests(
             for item in manifest.get("files", [])
         ],
     }
-    checksum_path.write_text(
-        json.dumps(checksum_manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    created: list[Path] = []
+    try:
+        for path, data in ((manifest_path, manifest), (checksum_path, checksum_manifest)):
+            with path.open("x", encoding="utf-8") as stream:
+                created.append(path)
+                stream.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    except BaseException:
+        for path in reversed(created):
+            path.unlink()
+        raise
     return manifest_path, checksum_path
 
 
@@ -118,6 +144,7 @@ def _write_zip(
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item in files:
             archived_files.append(_write_zip_payload(zf, item))
+        zf.writestr(BACKUP_MANIFEST_NAME, manifest_bytes(_finalize_manifest(manifest, archived_files)))
     return archived_files
 
 
@@ -130,50 +157,9 @@ def _write_tar(
     with tarfile.open(archive_path, "w:gz") as tf:
         for item in files:
             archived_files.append(_write_tar_payload(tf, item))
+        _write_tar_manifest(tf, _finalize_manifest(manifest, archived_files))
     return archived_files
 
-
-def _replace_embedded_manifest(
-    archive_path: Path,
-    archive_format: str,
-    manifest: dict[str, Any],
-    files: tuple[ScannedFile, ...],
-) -> None:
-    # Rebuild once so the embedded manifest reflects the exact bytes archived.
-    tmp_path = archive_path.with_name(archive_path.name + ".tmp")
-    if archive_format == "zip":
-        with zipfile.ZipFile(archive_path, "r") as src, zipfile.ZipFile(
-            tmp_path,
-            "w",
-            compression=zipfile.ZIP_DEFLATED,
-        ) as dst:
-            for info in src.infolist():
-                if info.filename == BACKUP_MANIFEST_NAME:
-                    continue
-                dst.writestr(info, src.read(info.filename))
-            dst.writestr(BACKUP_MANIFEST_NAME, manifest_bytes(manifest))
-    elif archive_format == "tar":
-        with tarfile.open(archive_path, "r:*") as src, tarfile.open(tmp_path, "w:gz") as dst:
-            for member in src.getmembers():
-                if member.name == BACKUP_MANIFEST_NAME:
-                    continue
-                if not member.isfile():
-                    continue
-                extracted = src.extractfile(member)
-                if extracted is None:
-                    raise ArchiveError(f"Unreadable tar member during manifest rebuild: {member.name}")
-                with extracted:
-                    payload = extracted.read()
-                info = tarfile.TarInfo(member.name)
-                info.size = len(payload)
-                info.mtime = member.mtime
-                info.mode = member.mode
-                dst.addfile(info, fileobj=BytesIO(payload))
-            _write_tar_manifest(dst, manifest)
-    else:
-        raise ArchiveError(f"Unsupported archive format: {archive_format}")
-    archive_path.unlink()
-    tmp_path.replace(archive_path)
 
 
 def _write_zip_payload(zf: zipfile.ZipFile, item: ScannedFile) -> dict[str, Any]:
@@ -232,6 +218,9 @@ def _finalize_manifest(
 ) -> dict[str, Any]:
     final_manifest = copy.deepcopy(manifest)
     final_manifest["files"] = sorted(files, key=lambda item: item["path"])
+    if final_manifest.get("private_metadata") is False:
+        for item in final_manifest["files"]:
+            item.pop("target", None)
     final_manifest["summary"]["file_count"] = len(files)
     final_manifest["summary"]["total_bytes"] = sum(item["size"] for item in files)
     return final_manifest

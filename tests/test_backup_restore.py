@@ -15,7 +15,7 @@ from verified_backup.verify import verify_archive
 def test_scan_includes_targets_and_excludes_secrets(sample_tree: Path, multi_target_rules: dict) -> None:
     rules = multi_target_rules
     scan = scan_source(sample_tree.resolve(), rules)
-    manifest = build_backup_manifest(scan, rules)
+    manifest = build_backup_manifest(scan, rules, include_private_metadata=True)
     included = {item["path"] for item in manifest["files"]}
     excluded = {item["path"]: item["reason"] for item in manifest["excluded"]}
 

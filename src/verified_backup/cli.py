@@ -11,6 +11,7 @@ from typing import Any
 from .archive import CORRUPT_ARCHIVE_ERRORS, make_archive_name, write_archive, write_sidecar_manifests
 from .config import DEFAULT_CONFIG_PATH, ConfigError, load_rules, resolve_source_root
 from .restore import RestoreSafetyError, restore_archive, restore_to_temp
+from .paths import is_relative_to
 from .scanner import build_backup_manifest, scan_source
 from .verify import verify_archive
 
@@ -83,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def add_root_config(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--include-private-metadata", action="store_true",
+                        help="Include absolute source path, rules and excluded names; do not share")
     parser.add_argument(
         "--root",
         type=Path,
@@ -101,12 +104,14 @@ def cmd_scan(args: argparse.Namespace) -> dict[str, Any]:
     rules = load_rules(args.config)
     source_root = resolve_source_root(args.root)
     scan = scan_source(source_root, rules)
-    manifest = build_backup_manifest(scan, rules, archive_format=None)
+    manifest = build_backup_manifest(scan, rules, archive_format=None,
+                                     include_private_metadata=args.include_private_metadata)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with args.output.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return {
-        "ok": True,
+        "ok": not scan.missing_targets,
         "manifest_path": str(args.output.resolve()) if args.output else None,
         "summary": manifest["summary"],
     }
@@ -115,8 +120,13 @@ def cmd_scan(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_backup(args: argparse.Namespace) -> dict[str, Any]:
     rules = load_rules(args.config)
     source_root = resolve_source_root(args.root)
+    if is_relative_to(args.output_dir, source_root):
+        raise ConfigError("Backup output directory must be outside the source root")
     scan = scan_source(source_root, rules)
-    manifest = build_backup_manifest(scan, rules, archive_format=args.format)
+    if scan.missing_targets:
+        raise ConfigError("Refusing backup with missing configured targets")
+    manifest = build_backup_manifest(scan, rules, archive_format=args.format,
+                                     include_private_metadata=args.include_private_metadata)
     archive_path = args.output_dir / make_archive_name(args.name, args.format)
     final_manifest = write_archive(
         archive_path=archive_path,

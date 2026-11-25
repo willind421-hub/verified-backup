@@ -10,7 +10,7 @@ from typing import Any, BinaryIO, Iterator
 
 from .archive import CORRUPT_ARCHIVE_ERRORS, ArchiveError
 from .paths import safe_join
-from .scanner import sha256_file
+from .scanner import root_fingerprint, sha256_file
 from .verify import payload_rel, read_embedded_manifest, sha256_readable, verify_archive
 
 
@@ -27,9 +27,10 @@ def restore_archive(
 ) -> dict[str, Any]:
     """Restore ``archive_path`` into ``dest``; a dry run unless ``execute`` is True.
 
-    Existing files are never overwritten. If the restore fails part-way (corrupt
-    archive, checksum mismatch, I/O error), every file and directory created by
-    this call is removed again, so the destination is left as it was.
+    Existing files are not overwritten. On an intermediate or final verification
+    failure, attempt to remove files/directories created by this call. Cleanup
+    needs filesystem permission; it is not a crash/power-loss recovery protocol.
+    Source and destination trees must be trusted and stable during the operation.
     """
     manifest = read_embedded_manifest(archive_path)
     dest = dest.expanduser().resolve()
@@ -40,7 +41,8 @@ def restore_archive(
             raise RestoreSafetyError("Archive verification failed before restore")
 
     source_root = manifest.get("source_root")
-    if execute and source_root and dest == Path(source_root).resolve():
+    if execute and ((source_root and dest == Path(source_root).resolve())
+                    or manifest.get("source_root_sha256") == root_fingerprint(dest)):
         raise RestoreSafetyError("Refusing to restore directly over the source root")
 
     planned = plan_restore(manifest, dest)
@@ -72,6 +74,9 @@ def restore_archive(
             if digest != expected_sha:
                 raise ArchiveError(f"Restored checksum mismatch: {rel_path}")
             restored += 1
+        verification = verify_restored_tree(manifest, dest)
+        if not verification["ok"]:
+            _rollback(created_files, created_dirs)
     except CORRUPT_ARCHIVE_ERRORS as exc:
         _rollback(created_files, created_dirs)
         raise ArchiveError(f"Archive is corrupt or unreadable: {exc}") from exc
@@ -79,7 +84,6 @@ def restore_archive(
         _rollback(created_files, created_dirs)
         raise
 
-    verification = verify_restored_tree(manifest, dest)
     return {
         "ok": verification["ok"],
         "mode": "execute",
@@ -197,20 +201,22 @@ def iter_payload_streams(archive_path: Path) -> Iterator[tuple[str, BinaryIO]]:
 def write_new_file_with_hash(stream: BinaryIO, out_path: Path) -> str:
     if out_path.exists():
         raise RestoreSafetyError(f"Refusing to overwrite existing file: {out_path}")
-    with out_path.open("xb") as f:
-        try:
+    # Once exclusive creation succeeds, every failure (including close/re-read)
+    # belongs to this call and must remove the file.
+    f = out_path.open("xb")
+    try:
+        with f:
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
                     break
                 f.write(chunk)
-        except BaseException:
-            # The file was created exclusively above, so removing it is safe.
-            f.close()
-            out_path.unlink()
-            raise
-    with out_path.open("rb") as f:
-        return sha256_readable(f)
+        with out_path.open("rb") as stream:
+            return sha256_readable(stream)
+    except BaseException:
+        f.close()
+        out_path.unlink()
+        raise
 
 
 def _make_dirs(path: Path, created: list[Path]) -> None:

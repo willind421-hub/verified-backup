@@ -48,7 +48,8 @@ def test_cli_backup_verify_restore_temp(tmp_path: Path, sample_tree: Path, capsy
 
 
 def test_cli_default_rules_back_up_whole_root(tmp_path: Path, sample_tree: Path, capsys) -> None:
-    assert main(["scan", "--root", str(sample_tree), "--output", str(tmp_path / "manifest.json")]) == 0
+    assert main(["scan", "--root", str(sample_tree), "--output", str(tmp_path / "manifest.json"),
+                 "--include-private-metadata"]) == 0
     capsys.readouterr()
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     included = {item["path"] for item in manifest["files"]}

@@ -23,6 +23,9 @@ Verified Backup makes each step checkable:
 
 ## What it guarantees
 
+These checks assume trusted, stable source/output/destination directories. They are
+not protection against an attacker concurrently replacing filesystem paths; see limitations.
+
 - **Content integrity.** Every payload file has a SHA-256 and size recorded in
   `BACKUP_MANIFEST.json` inside the archive, computed from the exact bytes archived.
   `verify` re-hashes every member and reports checksum mismatches, missing members,
@@ -33,24 +36,25 @@ Verified Backup makes each step checkable:
   - Dry-run by default; nothing is written without `--execute`.
   - Files are created with exclusive-create mode: an existing file is never overwritten.
     Any conflict aborts the restore before anything is written.
-  - Restoring directly over the source root recorded in the manifest is refused.
+  - Restoring directly over the source root is refused using its recorded path or root fingerprint.
   - Each restored file is hashed and compared to the manifest, and the whole restored
     tree is verified again at the end.
-  - If a restore fails part-way (corrupt archive, checksum mismatch, I/O error), every
-    file and directory created by that run is removed. Files that already existed in the
-    destination are left exactly as they were.
+  - If a restore fails part-way or its final verification fails, rollback attempts to
+    remove files/directories created by that run, including a partially written file.
+    Existing destination files are not selected for deletion. Cleanup needs filesystem
+    permission and is not guaranteed after process termination or power loss.
 - **Path safety.** Archive members must live under `payload/`, absolute paths and `..`
   are rejected, non-file tar members (links, devices) are rejected, and rule target paths
   may not escape the source root.
 - **Links are never followed silently.** Symlinks and Windows junctions are detected
   on the unresolved path, component by component, before anything is resolved. By
-  default (`skip_symlinks: true`) linked files are skipped and listed in the manifest
-  with reason `symlink`. With `skip_symlinks: false`, a link is followed only if its real
-  location is inside the source root; otherwise the file is listed with reason
+  default (`skip_symlinks: true`) linked files are skipped and counted with reason
+  `symlink`. With `skip_symlinks: false`, a link is followed only if its real
+  location is inside the source root; otherwise the file is counted with reason
   `outside_root`.
 - **Secret-like file names are excluded** (`.env`, `*token*`, `*.pem`, `id_rsa*`, ...)
-  before anything is hashed or archived. Every exclusion is listed in the manifest
-  together with its reason.
+  before anything is hashed or archived. The default manifest counts exclusions by
+  reason; detailed paths require the explicit private-metadata option below.
 
 ## Design
 
@@ -64,13 +68,13 @@ archive ──► verify_archive            archive ──► restore_archive (d
 Archive layout:
 
 ```
-BACKUP_MANIFEST.json        full manifest: source root, rules snapshot, files, exclusions
+BACKUP_MANIFEST.json        file hashes/sizes, root fingerprint, exclusion counts
 payload/<relative/path>     file contents, relative to the source root
 ```
 
 Sidecars written next to the archive:
 
-- `<archive>.manifest.json` – copy of the full manifest
+- `<archive>.manifest.json` – copy of the embedded manifest (same privacy setting)
 - `<archive>.checksums.json` – archive SHA-256 and per-file SHA-256/size
 
 | Module | Responsibility |
@@ -135,13 +139,58 @@ verified-backup restore backups/my-folder-2026-01-01.zip --dest ./restore-check 
 verified-backup restore-temp backups/my-folder-2026-01-01.zip --temp-root ./restore-tmp
 
 # Use custom rules
-verified-backup backup --root ./my-folder --config my_rules.json
+verified-backup backup --root ./my-folder --config my_rules.json --output-dir backups
 ```
 
-`--root` is always required; there is no implicit default source. `python -m verified_backup`
-works as well. Every command prints JSON. Exit codes: `0` success, `1` the result reports
-`"ok": false` (failed verification, dry-run conflicts), `2` error (invalid rules, missing
-root, corrupt archive, refused restore).
+`--root` is required only for `scan` and `backup`; these have no implicit default
+source. `verify`, `restore`, `restore-temp` and `rules` do not accept it.
+`python -m verified_backup` works as well. Operation results/errors are JSON;
+`--help` and argument-parser errors are text. Exit codes: `0` success, `1` a result
+with `"ok": false` (failed verification, dry-run conflicts, missing scan targets),
+`2` an error (invalid rules/root/archive, refused backup or restore).
+
+### Safety defaults and sharing
+
+- Every configured target path is required. `scan` reports missing-target counts and
+  exits `1`; `backup` exits `2` before creating an archive. There is no optional-target
+  flag. An existing but empty target, or an include pattern matching nothing, is not a
+  missing path: inspect `summary.file_count` if you require nonempty backups.
+- Keep `--output-dir` **outside** `--root`. The CLI rejects output equal to or inside
+  the source rather than silently excluding it. From inside a source folder use
+  `verified-backup backup --root . --output-dir ../backups`. The default `backups`
+  directory is relative to the working directory, not to `--root`. `--name` is one
+  filename stem, never a path; separators, ADS colons and Windows reserved names fail.
+- Archive staging uses a unique exclusively created neighbor, then no-replace hard-link
+  publication. Filesystems without hard-link support fail closed. Existing archives,
+  sidecars and `scan --output` files are refused, not replaced; choose a fresh name.
+  A failed sidecar write can leave the already completed archive; the three files are
+  **not** one crash-atomic transaction. Check the exit status, then inspect/verify it.
+- By default manifests omit the absolute source path, rule snapshot, excluded/missing
+  names and target labels. They keep per-reason `excluded_counts`, summary counts,
+  included relative names, hashes, sizes, timestamps and `source_root_sha256`.
+  The root fingerprint is a comparison identifier, **not anonymization**: a guessed
+  root can be tested. Included names/content can still be private; archives are not encrypted.
+- For a **local-only** detailed scan, explicitly opt in:
+
+  ```bash
+  verified-backup scan --root ./my-folder --output local-private.json --include-private-metadata
+  ```
+
+  `backup --include-private-metadata` also embeds those details in the archive and its
+  manifest sidecar: do not share them. Python callers use
+  `build_backup_manifest(scan, rules, include_private_metadata=True)`.
+- Defaults exclude `.netrc`, `.pgpass`, `.npmrc`, `.pypirc`, `auth.json`, `*.ppk`,
+  `*.jks`, `*.keystore`, `wallet.dat`, `.git-credentials` and the `.ssh`, `.gnupg`,
+  `.aws`, `.kube`, `.docker` trees at every depth, in addition to the older patterns.
+  A custom rules file **replaces**, not merges with, defaults. Review a local private
+  scan before relying on it. Credentials in a neutral `settings.json`, browser
+  `Login Data`, or a renamed key can still be included; content is never secret-scanned.
+- Readers reject invalid manifest fields, duplicate members/paths (including case-only
+  collisions), missing/extra payloads, traversal, backslashes, ADS `:`, Windows devices,
+  trailing dots/spaces, and file/directory collisions. Size and SHA-256 must both match.
+  This deliberately rejects some names legal on POSIX for portable restores.
+  Backup creation validates the final manifest against the same rules before publishing
+  the archive, so unsupported names or collisions fail instead of producing an unrestorable backup.
 
 ## Python API
 
@@ -157,6 +206,8 @@ from verified_backup.verify import verify_archive
 rules = load_rules()                                  # or load_rules("my_rules.json")
 root = resolve_source_root("my-folder")
 scan = scan_source(root, rules)
+if scan.missing_targets:
+    raise RuntimeError("Missing configured targets")
 manifest = build_backup_manifest(scan, rules, archive_format="zip")
 
 archive = Path("backups/my-folder.zip")
@@ -173,6 +224,8 @@ done = restore_archive(archive_path=archive, dest=Path("restore-check"), execute
 Errors: `ConfigError` (rules / source root), `ArchiveError` (unsupported, corrupt or
 inconsistent archive), `RestoreSafetyError` (conflict, source-root restore, failed
 pre-verification).
+The low-level writer does not choose safe source/output placement for you: keep
+`archive` outside `root`, and use a fresh path for each run.
 
 ## Example
 
@@ -209,14 +262,23 @@ privileges.
   captured in a torn state.
 - **Secret detection is name-based only.** File contents are not scanned. The default
   patterns are deliberately broad and can over-exclude (e.g. `tokenizer.py` matches
-  `*token*`); review the `excluded` list in the manifest and adjust the rules.
+  `*token*`); review `excluded_counts`, or opt into a local private scan to review
+  the detailed `excluded` list, and adjust the rules.
 - **Integrity, not authenticity.** Checksums detect accidental damage. They do not stop
   someone who can rewrite both the archive and its sidecar; store the sidecar or its hash
   separately if that matters. Archives are not encrypted.
 - **Content only.** Restored files get fresh timestamps; permissions, ownership, ACLs,
   extended attributes and empty directories are not preserved.
 - **Memory use.** tar payloads and restored members are read fully into memory, so very
-  large single files need a matching amount of RAM.
+  large single files need a matching amount of RAM. There are no member-count or
+  decompressed-size quotas; do not treat this as an untrusted-archive sandbox.
+- **Filesystem races and durability.** Name/path checks and file opens are separate;
+  exclusive creation and no-replace publication do not prevent malicious concurrent
+  ancestor, symlink/junction, staging-file or hard-link/8.3-alias replacement. Use
+  directories writable only by trusted users, stop concurrent writers, and do not
+  rely on the root fingerprint as filesystem identity proof. There is no directory
+  fsync, recovery journal or tested power-loss guarantee. Rollback is best effort
+  if cleanup itself fails; inspect the destination after such an error.
 - **Junction traversal.** Python's `glob` descends into Windows junctions; files found
   behind them are excluded, but the directories are still enumerated, so a junction loop
   makes scans slow.

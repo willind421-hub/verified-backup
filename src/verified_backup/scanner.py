@@ -5,6 +5,8 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import os
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -251,6 +253,8 @@ def build_backup_manifest(
     scan: ScanResult,
     rules: dict[str, Any],
     archive_format: str | None = None,
+    *,
+    include_private_metadata: bool = False,
 ) -> dict[str, Any]:
     files = [
         {
@@ -271,7 +275,7 @@ def build_backup_manifest(
         for item in scan.excluded
     ]
     total_bytes = sum(item.size for item in scan.files)
-    return {
+    manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_root": scan.source_root.as_posix(),
@@ -287,6 +291,22 @@ def build_backup_manifest(
         "excluded": excluded,
         "files": files,
     }
+    if not include_private_metadata:
+        manifest.pop("source_root")
+        manifest.pop("rules")
+        manifest["source_root_sha256"] = root_fingerprint(scan.source_root)
+        manifest["excluded_counts"] = dict(Counter(item.reason for item in scan.excluded))
+        manifest["excluded"] = []
+        manifest["missing_targets"] = []
+        for item in files:
+            item.pop("target")
+    manifest["private_metadata"] = include_private_metadata
+    return manifest
+
+
+def root_fingerprint(root: Path) -> str:
+    """Comparison identifier, not anonymization or a filesystem identity proof."""
+    return hashlib.sha256(os.path.normcase(str(root.resolve())).encode("utf-8")).hexdigest()
 
 
 def manifest_bytes(manifest: dict[str, Any]) -> bytes:
